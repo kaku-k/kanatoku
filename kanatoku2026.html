@@ -505,15 +505,54 @@
     
 </div>
 
+<!-- Firebase Modular Core Web SDK (Loads safely over CDNs) -->
+<script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+    // Global variables standard configuration (Guarantees safe fallbacks for runtime execution)
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'kanatoku-tracker-app';
+    const rawFirebaseConfig = typeof __firebase_config !== 'undefined' ? __firebase_config : null;
+    
+    // Aesthetic fallback configuration if executed outside standard environment (Local development fallback)
+    const firebaseConfig = rawFirebaseConfig ? JSON.parse(rawFirebaseConfig) : {
+        apiKey: "",
+        authDomain: "kanatoku-tracker-app.firebaseapp.com",
+        projectId: "kanatoku-tracker-app",
+        storageBucket: "kanatoku-tracker-app.appspot.com",
+        messagingSenderId: "100000000000",
+        appId: "1:100000000000:web:abcdef1234567890"
+    };
+
+    // Firebase Services Initialization
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+
+    // Initial Auth Token handling (Priority to standard runtime token setup)
+    const initAuthentication = async () => {
+        try {
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                await signInWithCustomToken(auth, __initial_auth_token);
+            } else {
+                await signInAnonymously(auth);
+            }
+        } catch (e) {
+            console.error("Firebase Authentication failed:", e);
+        }
+    };
+    initAuthentication();
+
+    // Export services seamlessly for Vue 3 application mount with necessary firestore functions
+    window.AppFirebase = { auth, db, appId, onAuthStateChanged, doc, setDoc, onSnapshot };
+</script>
+
 <!-- Vue 3 CDN -->
 <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
 
 <script>
     const { createApp, ref, computed, onMounted, watch } = Vue;
-
-    // A4gWbX9Rsh4E3n7vD8pQ represents our public high-performance anonymous database endpoint
-    const SYNC_BUCKET_ID = 'A4gWbX9Rsh4E3n7vD8pQ';
-    const SYNC_API_BASE = `https://kvdb.io/${SYNC_BUCKET_ID}/`;
 
     createApp({
         setup() {
@@ -539,14 +578,12 @@
                 amount: null
             });
 
-            // Master reactive states
+            // Reactive State Variables
             const transactions = ref([]);
-            const deletedIds = ref([]); // Tracks deleted transaction IDs to prevent deleted items from coming back during merge
-            const syncId = ref(''); // Cloud unique sync code
-
-            // Control lock to prevent circular triggers during Cloud pull
-            let isUpdatingFromCloud = false;
-            let cloudPushTimeout = null;
+            const syncId = ref(''); // Cloud unique share/sync code
+            const syncConnected = ref(false); // Connectivity monitor state
+            const firebaseUser = ref(null);
+            let firestoreUnsubscribe = null; // Unsubscribe handler for Firestore real-time stream
 
             // Custom UI Modal State
             const modal = ref({
@@ -589,9 +626,9 @@
                 }, 2500);
             };
 
-            // Generates 6-character clean unique alphanumeric sync key
+            // Helper to generate a human-readable high-entropy 6-character uppercase sync key
             const generateSyncKey = () => {
-                const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Highly legible keys
+                const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // High legibility list (avoiding 1, I, 0, O)
                 let result = '';
                 for (let i = 0; i < 6; i++) {
                     result += chars.charAt(Math.floor(Math.random() * chars.length));
@@ -599,15 +636,15 @@
                 return result;
             };
 
-            // Setup Synchronization Session and URL parameter enforcement
+            // Setup Synchronization Session and URL Query Parameter logic
             const initializeSyncId = () => {
                 let id = '';
+                
+                // 1. Read from URL Search/Query Parameters (?syncId=ABCDEF) - Highly resilient across transitions
                 const urlParams = new URLSearchParams(window.location.search);
                 const querySyncId = urlParams.get('syncId');
-
-                // 1. Read from URL search parameter (?syncId=ABCDEF)
                 if (querySyncId && querySyncId.match(/^[A-Z2-9]{6}$/)) {
-                    id = querySyncId.trim().toUpperCase();
+                    id = cleanKey(querySyncId);
                     localStorage.setItem('kanatoku_sync_id', id);
                 }
 
@@ -626,122 +663,110 @@
                 }
 
                 syncId.value = id;
-                updateUrlParams(id);
+                updateUrlHash(id);
             };
 
-            // Forces URL parameters so share triggers and "Add to Home Screen" preserve syncId
-            const updateUrlParams = (id) => {
+            // Silently writes query parameter/hash back to browser address bar without forcing reloads
+            const updateUrlHash = (id) => {
                 try {
+                    // Blob URL environments and iFrames fail on history updates
                     if (window.location.protocol === 'blob:' || window.location.ancestorOrigins?.length > 0) {
-                        return; // Guard restricted preview frame environments
+                        window.location.hash = `syncId=${id}`;
+                        return;
                     }
+                    // URL parameter method chosen to guarantee "Add to Home Screen" carries over syncId natively
                     const newSearch = new URLSearchParams(window.location.search);
-                    if (newSearch.get('syncId') !== id) {
-                        newSearch.set('syncId', id);
-                        const cleanUrl = window.location.pathname + '?' + newSearch.toString();
-                        window.history.replaceState(null, document.title, cleanUrl);
+                    newSearch.set('syncId', id);
+                    const cleanUrl = window.location.pathname + '?' + newSearch.toString();
+                    history.replaceState(null, document.title, cleanUrl);
+                } catch (e) {
+                    console.warn("History API is restricted in this environment:", e);
+                    try {
+                        window.location.hash = `syncId=${id}`;
+                    } catch (hashError) {
+                        console.warn("Failed to update URL hash safely:", hashError);
                     }
-                } catch (e) {
-                    console.warn("History API is restricted:", e);
                 }
             };
 
-            // Commit local states seamlessly to Cloud database
-            const pushStateToCloud = async () => {
-                if (!syncId.value || isUpdatingFromCloud) return;
+            // Cleaner helper for keys
+            const cleanKey = (val) => {
+                return String(val).trim().toUpperCase();
+            };
 
-                const payload = {
-                    transactions: transactions.value,
-                    deletedIds: deletedIds.value,
-                    updatedAt: Date.now()
-                };
-
-                try {
-                    await fetch(SYNC_API_BASE + syncId.value, {
-                        method: 'POST',
-                        body: JSON.stringify(payload)
-                    });
-                } catch (e) {
-                    console.warn("Cloud push failed (Offline / Rate limited):", e);
+            // Primary data setup connector (Watches for authentication state transitions before querying)
+            const setupFirestoreListener = (user) => {
+                if (!user) return;
+                
+                // Unsubscribe from any active previous stream cleanly
+                if (firestoreUnsubscribe) {
+                    firestoreUnsubscribe();
                 }
-            };
 
-            // Triggers debounced save to cloud to prevent excessive HTTP hits during active typing
-            const triggerDebouncedCloudPush = () => {
-                if (cloudPushTimeout) clearTimeout(cloudPushTimeout);
-                cloudPushTimeout = setTimeout(() => {
-                    pushStateToCloud();
-                }, 1000);
-            };
+                const db = window.AppFirebase.db;
+                const appId = window.AppFirebase.appId;
+                const doc = window.AppFirebase.doc;
+                const onSnapshot = window.AppFirebase.onSnapshot;
 
-            // Loads and merges data from Cloud ensuring no loss on different browser platforms
-            const pullStateFromCloud = async (silent = true) => {
-                if (!syncId.value || isUpdatingFromCloud) return;
+                // Path adherence (RULE 1 - Strict Pathing rules applied)
+                const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'sync_sessions', syncId.value);
 
-                try {
-                    const response = await fetch(SYNC_API_BASE + syncId.value);
-                    if (!response.ok) return; // Fresh sync ID with no cloud document yet
-
-                    const cloudData = await response.json();
-                    if (!cloudData || !Array.isArray(cloudData.transactions)) return;
-
-                    isUpdatingFromCloud = true;
-
-                    // 1. Resolve Deleted Records list
-                    const mergedDeletedIds = Array.from(new Set([
-                        ...deletedIds.value,
-                        ...(cloudData.deletedIds || [])
-                    ]));
-                    deletedIds.value = mergedDeletedIds;
-                    localStorage.setItem('kanatoku_deleted_ids', JSON.stringify(mergedDeletedIds));
-
-                    // 2. Dual-side intelligent merges (prioritizing transaction items with newer timestamps)
-                    const mergedMap = new Map();
-
-                    // Map existing local items
-                    transactions.value.forEach(item => {
-                        if (item && item.id && !mergedDeletedIds.includes(item.id)) {
-                            mergedMap.set(item.id, item);
+                // Fetch database document reactively
+                firestoreUnsubscribe = onSnapshot(docRef, (snapshot) => {
+                    syncConnected.value = true;
+                    if (snapshot.exists()) {
+                        const data = snapshot.data();
+                        if (data && Array.isArray(data.transactions)) {
+                            transactions.value = data.transactions;
                         }
-                    });
-
-                    // Map cloud items (older cloud versions don't overwrite newer local versions)
-                    cloudData.transactions.forEach(cloudItem => {
-                        if (cloudItem && cloudItem.id && !mergedDeletedIds.includes(cloudItem.id)) {
-                            const localItem = mergedMap.get(cloudItem.id);
-                            if (!localItem || (cloudItem.updatedAt || 0) > (localItem.updatedAt || 0)) {
-                                mergedMap.set(cloudItem.id, cloudItem);
+                    } else {
+                        // Migrate legacy transactions from LocalStorage to the Cloud if this is a newly generated syncId
+                        const localStored = localStorage.getItem('kanatoku_transactions');
+                        if (localStored) {
+                            try {
+                                const parsed = JSON.parse(localStored);
+                                if (parsed && parsed.length > 0) {
+                                    transactions.value = parsed;
+                                    saveTransactionsToCloud(parsed);
+                                }
+                            } catch (e) {
+                                console.error("Error migrating local storage data to Cloud:", e);
                             }
                         }
-                    });
-
-                    const mergedList = Array.from(mergedMap.values());
-                    
-                    // Trigger UI state updates if modifications are verified
-                    if (JSON.stringify(transactions.value) !== JSON.stringify(mergedList)) {
-                        transactions.value = mergedList;
-                        localStorage.setItem('kanatoku_transactions', JSON.stringify(mergedList));
-                        if (!silent) {
-                            showToast("クラウド同期：最新のデータを反映しました！");
-                        }
                     }
+                }, (error) => {
+                    console.error("Firestore synchronisation error:", error);
+                    syncConnected.value = false;
+                });
+            };
 
-                    isUpdatingFromCloud = false;
+            // Sync modification operations to Firestore document reactively
+            const saveTransactionsToCloud = async (newList) => {
+                if (!firebaseUser.value) return;
+                const db = window.AppFirebase.db;
+                const appId = window.AppFirebase.appId;
+                const doc = window.AppFirebase.doc;
+                const setDoc = window.AppFirebase.setDoc;
+
+                const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'sync_sessions', syncId.value);
+                try {
+                    await setDoc(docRef, {
+                        transactions: JSON.parse(JSON.stringify(newList)),
+                        updatedAt: Date.now()
+                    });
                 } catch (e) {
-                    console.warn("Cloud pull failed:", e);
-                    isUpdatingFromCloud = false;
+                    console.error("Failed to commit data list to Firestore cloud:", e);
                 }
             };
 
-            // Local watch setups to guarantee persistent storage
+            // Watch Vue state changes locally and trigger Firestore push
             watch(transactions, (newVal) => {
-                if (!isUpdatingFromCloud) {
-                    localStorage.setItem('kanatoku_transactions', JSON.stringify(newVal));
-                    triggerDebouncedCloudPush();
-                }
+                // Keep local storage as a reliable high-performance fallback
+                localStorage.setItem('kanatoku_transactions', JSON.stringify(newVal));
+                saveTransactionsToCloud(newVal);
             }, { deep: true });
 
-            // Computed Calculations
+            // Computed Calculations (Unchanged responsive data structures)
             const calcState = computed(() => {
                 const serviceRewards = { PayPay: 0, '楽天Pay': 0, 'au Pay': 0, d払い: 0, 'AEON Pay': 0, メルペイ: 0 };
                 const serviceSpend = { PayPay: 0, '楽天Pay': 0, 'au Pay': 0, d払い: 0, 'AEON Pay': 0, メルペイ: 0 };
@@ -829,7 +854,6 @@
                 return `${parseInt(parts[1], 10)}/${parseInt(parts[2], 10)}(${weekDays[d.getDay()]})`;
             };
 
-            // Copy static app URL cleanly for sharing fresh templates with friends
             const copyBlankUrl = () => {
                 try {
                     const url = new URL(window.location.href);
@@ -857,7 +881,7 @@
                         throw new Error();
                     }
                 } catch (err) {
-                    showToast("コピーに失敗しました。アドレスバーの?syncId=以降を消して共有してください。", "fa-solid fa-triangle-exclamation");
+                    showToast("コピーに失敗しました。アドレス欄の?syncId=以降を消して共有してください。", "fa-solid fa-triangle-exclamation");
                 }
             };
 
@@ -873,15 +897,13 @@
                     return;
                 }
 
-                const now = Date.now();
                 const newTx = {
-                    id: now,
+                    id: Date.now(),
                     date: form.value.date,
                     service: form.value.service,
                     storeType: form.value.storeType,
                     storeName: form.value.storeName.trim(),
-                    amount: parseInt(form.value.amount, 10),
-                    updatedAt: now
+                    amount: parseInt(form.value.amount, 10)
                 };
 
                 transactions.value.push(newTx);
@@ -914,7 +936,6 @@
                     return;
                 }
 
-                const now = Date.now();
                 transactions.value = transactions.value.map(t => {
                     if (t.id === editModal.value.txId) {
                         return {
@@ -923,8 +944,7 @@
                             service: editForm.value.service,
                             storeType: editForm.value.storeType,
                             storeName: editForm.value.storeName.trim(),
-                            amount: parseInt(editForm.value.amount, 10),
-                            updatedAt: now
+                            amount: parseInt(editForm.value.amount, 10)
                         };
                     }
                     return t;
@@ -944,10 +964,6 @@
                 modal.value.show = true;
                 modal.value.resolve = (confirmed) => {
                     if (confirmed) {
-                        // Register item onto deleted lists to block reverse-syncing deleted records
-                        deletedIds.value.push(tx.id);
-                        localStorage.setItem('kanatoku_deleted_ids', JSON.stringify(deletedIds.value));
-
                         transactions.value = transactions.value.filter(t => t.id !== tx.id);
                         showToast("取引履歴を削除しました。");
                     }
@@ -962,34 +978,22 @@
                 }
             };
 
+            // Lifecycle Hook
             onMounted(() => {
-                // Initialize local parameters
                 initializeSyncId();
 
-                // Load initial local caches
-                const storedTxs = localStorage.getItem('kanatoku_transactions');
-                if (storedTxs) {
-                    try { transactions.value = JSON.parse(storedTxs); } catch(e) {}
-                }
-                const storedDels = localStorage.getItem('kanatoku_deleted_ids');
-                if (storedDels) {
-                    try { deletedIds.value = JSON.parse(storedDels); } catch(e) {}
-                }
-
-                // Immediate cloud pulling action
-                pullStateFromCloud(false);
-
-                // Auto-sync listeners when transitioning states (e.g. from background to active screen)
-                document.addEventListener('visibilitychange', () => {
-                    if (document.visibilityState === 'visible') {
-                        pullStateFromCloud(true);
+                // Wait for Firebase Core authentication initialization before booting DB stream (RULE 3 compliance)
+                const checkFirebaseInterval = setInterval(() => {
+                    if (window.AppFirebase && window.AppFirebase.onAuthStateChanged) {
+                        clearInterval(checkFirebaseInterval);
+                        window.AppFirebase.onAuthStateChanged(window.AppFirebase.auth, (user) => {
+                            if (user) {
+                                firebaseUser.value = user;
+                                setupFirestoreListener(user);
+                            }
+                        });
                     }
-                });
-
-                // Standard polling background synchronizer (Every 10 seconds)
-                setInterval(() => {
-                    pullStateFromCloud(true);
-                }, 10000);
+                }, 100);
             });
 
             return {
@@ -1019,7 +1023,8 @@
                 formSingleTxReward,
                 formFinalExpectedReward,
                 isRewardCappedByLimit,
-                syncId
+                syncId,
+                syncConnected
             };
         }
     }).mount('#app');
