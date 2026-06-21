@@ -3,6 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <!-- Open Graph Protocol (OGP) Tags for LINE/SNS Link Preview Customization -->
+    <meta property="og:title" content="かなトク！利用金額管理">
+    <meta property="og:description" content="キャッシュレス決済サービスごとの還元額や利用状況を個人で簡単に管理できるWebアプリです。">
+    <meta property="og:type" content="website">
+    <!-- Placeholder for visual preview images (Safe default) -->
+    <meta property="og:image" content="https://images.unsplash.com/photo-1559526324-4b87b5e36e44?auto=format&fit=crop&w=600&q=80">
     <title>かなトク！利用金額管理</title>
     <!-- Tailwind CSS for modern responsive styling -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -52,6 +58,13 @@
         }
         input[type="number"] {
             -moz-appearance: textfield;
+        }
+        
+        /* V-CLOAK: Prevents raw uncompiled Vue code templates (like {{ toast.message }}) 
+           from leaking into indexers, SEO bots, or showing up on the page during load.
+        */
+        [v-cloak] {
+            display: none !important;
         }
     </style>
 </head>
@@ -133,7 +146,7 @@
                 </div>
             </div>
 
-            <!-- Estimated reward preview based on current state inputs (UPDATED: High-fidelity limits and warnings) -->
+            <!-- Estimated reward preview based on current state inputs -->
             <div v-if="form.amount > 0 || isFormServiceCapped" class="p-3 bg-rose-50/50 border border-rose-100 rounded-xl text-xs space-y-1">
                 <!-- If the cashless service has already reached its 2500 limit -->
                 <div v-if="isFormServiceCapped" class="text-center py-1 font-bold text-rose-600">
@@ -205,7 +218,7 @@
         </div>
     </div>
 
-    <!-- 3. Status per Cashless Service Section (With reverse dynamic calculation) -->
+    <!-- 3. Status per Cashless Service Section -->
     <div class="mb-5">
         <div class="flex justify-between items-center mb-3">
             <h2 class="text-md font-bold flex items-center text-slate-800">
@@ -243,7 +256,7 @@
                     </div>
                 </div>
 
-                <!-- NEW/UPDATED: Reverse Calculation Display -->
+                <!-- Reverse Calculation Display -->
                 <div v-if="(calcState.serviceRewards[service] || 0) < 2500" class="text-[10px] text-slate-500 space-y-0.5 border-t border-slate-100/50 pt-1.5 mt-1.5">
                     <div class="flex justify-between">
                         <span>中小店舗ならあと</span>
@@ -255,7 +268,7 @@
                     </div>
                 </div>
 
-                <!-- Fully reached cap notification label (UPDATED text to exact match) -->
+                <!-- Fully reached cap notification label -->
                 <div v-else class="flex items-center gap-1 text-[10px] text-rose-500 font-bold mt-1.5 pt-1 border-t border-slate-100/50">
                     <i class="fa-solid fa-circle-check"></i>
                     <span>還元上限に到達しました</span>
@@ -337,7 +350,7 @@
         </div>
     </div>
 
-    <!-- 5. Kanatoku Program Rules Summary (UPDATED with exact text from request) -->
+    <!-- 5. Kanatoku Program Rules Summary -->
     <div class="glass-card p-5 rounded-3xl shadow-sm mb-5">
         <h2 class="text-md font-bold mb-3 flex items-center text-slate-800">
             <i class="fa-solid fa-circle-info text-sky-500 mr-2"></i>かなトク！概要
@@ -407,7 +420,7 @@
         </div>
     </div>
 
-    <!-- Custom Modal Overlay -->
+    <!-- Custom Modal Overlay (Simplified delete confirm modal only) -->
     <transition enter-active-class="ease-out duration-300" enter-from-class="opacity-0 scale-95" enter-to-class="opacity-100 scale-100" leave-active-class="ease-in duration-200" leave-from-class="opacity-100 scale-100" leave-to-class="opacity-0 scale-95">
         <div v-if="modal.show" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
             <div class="w-full max-w-sm bg-white rounded-3xl p-5 shadow-2xl border border-slate-100">
@@ -473,7 +486,6 @@
                     <div class="flex items-center gap-3">
                         <label class="w-20 text-xs font-bold text-slate-500 shrink-0">支払金額</label>
                         <div class="relative flex-1">
-                            <!-- type="number" with numeric pattern and inputmode to open numeric keypad inside iOS -->
                             <input type="number" inputmode="numeric" pattern="[0-9]*" v-model.number="editForm.amount" min="1" required
                                    class="w-full bg-slate-50 border border-slate-200 rounded-xl pl-3 pr-8 py-1.5 text-xs font-black focus:outline-none">
                             <span class="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400">円</span>
@@ -617,7 +629,7 @@
                 return Math.ceil(remainingReward / rate);
             };
 
-            // NEW: Reactive Computations for Form Input Simulation Limits
+            // Reactive Computations for Form Input Simulation Limits
             const isFormServiceCapped = computed(() => {
                 return (calcState.value.serviceRewards[form.value.service] || 0) >= 2500;
             });
@@ -754,54 +766,18 @@
                 if (parsedShared && Array.isArray(parsedShared) && parsedShared.length > 0) {
                     // Check if local storage differs from incoming hash URL
                     const isDifferent = JSON.stringify(parsedStored) !== JSON.stringify(parsedShared);
-                    if (isDifferent && parsedStored.length > 0) {
-                        // Request confirmation on overwriting or merging shared logs if local state also exists
-                        setTimeout(() => {
-                            confirmImport(parsedShared);
-                        }, 500);
+                    if (isDifferent) {
+                        // NO MORE CONFIRM MODAL! Directly overwrite to sync exactly.
+                        transactions.value = parsedShared;
+                        localStorage.setItem('kanatoku_transactions', JSON.stringify(parsedShared));
+                        showToast("最新データを自動同期しました！");
                     } else {
-                        // Directly load shared if local is empty or matches
                         transactions.value = parsedShared;
                     }
                 } else {
                     // Fallback to local storage if no hash is present
                     transactions.value = parsedStored;
                 }
-            };
-
-            // Request permission before integrating shared dataset
-            const confirmImport = (sharedData) => {
-                modal.value.title = "共有データを検出しました";
-                modal.value.body = `別のブラウザで保存された ${sharedData.length} 件のデータがURLに含まれています。\n\n現在のデータを残したまま結合（マージ）するか、新データで上書きするか選択してください。`;
-                modal.value.icon = "fa-solid fa-cloud-arrow-down text-indigo-500";
-                modal.value.confirmText = "マージする";
-                modal.value.cancelText = "上書きする";
-                
-                modal.value.show = true;
-                modal.value.resolve = (agree) => {
-                    if (agree) {
-                        // Merge logic: matching duplicates using generated timestamps & features
-                        const existingKeys = new Set(transactions.value.map(t => `${t.date}-${t.service}-${t.amount}-${t.storeName}`));
-                        let mergedCount = 0;
-                        sharedData.forEach(item => {
-                            const key = `${item.date}-${item.service}-${item.amount}-${item.storeName}`;
-                            if (!existingKeys.has(key)) {
-                                // Assign new unique ID to prevent conflicts
-                                item.id = Date.now() + Math.floor(Math.random() * 10000);
-                                transactions.value.push(item);
-                                mergedCount++;
-                            }
-                        });
-                        showToast(`${mergedCount} 件の新規履歴を追加しました。`);
-                    } else {
-                        // Overwrite logic
-                        transactions.value = sharedData.map((item, idx) => ({
-                            ...item,
-                            id: Date.now() + idx
-                        }));
-                        showToast("履歴を共有データで上書きしました。");
-                    }
-                };
             };
 
             // Add custom transaction record
