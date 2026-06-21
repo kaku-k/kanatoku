@@ -90,6 +90,16 @@
         </div>
     </transition>
 
+    <!-- 注意事項の注釈欄 -->
+    <div class="bg-amber-50 border border-amber-200/60 rounded-3xl p-4.5 mb-5 text-xs text-amber-800 space-y-1">
+        <div class="font-bold flex items-center mb-1.5 text-amber-900">
+            <i class="fa-solid fa-triangle-exclamation mr-1.5 text-amber-600"></i>ご利用上の注意
+        </div>
+        <p>・入力は1つのブラウザで行ってください。</p>
+        <p>・異なるブラウザでの入力は非対応です。</p>
+        <p>・「ホーム画面に追加」からの入力も非対応です。</p>
+    </div>
+
     <!-- 1. New Payment Form Card -->
     <div class="glass-card p-5 rounded-3xl shadow-sm mb-5">
         <h2 class="text-md font-bold mb-4 flex items-center text-slate-800">
@@ -505,49 +515,6 @@
     
 </div>
 
-<!-- Firebase Modular Core Web SDK (Loads safely over CDNs) -->
-<script type="module">
-    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-    import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-    import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-
-    // Global variables standard configuration (Guarantees safe fallbacks for runtime execution)
-    const appId = typeof __app_id !== 'undefined' ? __app_id : 'kanatoku-tracker-app';
-    const rawFirebaseConfig = typeof __firebase_config !== 'undefined' ? __firebase_config : null;
-    
-    // Aesthetic fallback configuration if executed outside standard environment (Local development fallback)
-    const firebaseConfig = rawFirebaseConfig ? JSON.parse(rawFirebaseConfig) : {
-        apiKey: "",
-        authDomain: "kanatoku-tracker-app.firebaseapp.com",
-        projectId: "kanatoku-tracker-app",
-        storageBucket: "kanatoku-tracker-app.appspot.com",
-        messagingSenderId: "100000000000",
-        appId: "1:100000000000:web:abcdef1234567890"
-    };
-
-    // Firebase Services Initialization
-    const app = initializeApp(firebaseConfig);
-    const auth = getAuth(app);
-    const db = getFirestore(app);
-
-    // Initial Auth Token handling (Priority to standard runtime token setup)
-    const initAuthentication = async () => {
-        try {
-            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                await signInWithCustomToken(auth, __initial_auth_token);
-            } else {
-                await signInAnonymously(auth);
-            }
-        } catch (e) {
-            console.error("Firebase Authentication failed:", e);
-        }
-    };
-    initAuthentication();
-
-    // Export services seamlessly for Vue 3 application mount with necessary firestore functions
-    window.AppFirebase = { auth, db, appId, onAuthStateChanged, doc, setDoc, onSnapshot };
-</script>
-
 <!-- Vue 3 CDN -->
 <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
 
@@ -578,15 +545,8 @@
                 amount: null
             });
 
-            // Reactive State Variables
+            // Master reactive state (Load directly from simple localStorage)
             const transactions = ref([]);
-            const syncId = ref(''); // Cloud unique share/sync code
-            const syncConnected = ref(false); // Connectivity monitor state
-            const firebaseUser = ref(null);
-            let firestoreUnsubscribe = null; // Unsubscribe handler for Firestore real-time stream
-            
-            // クラウド更新中の循環呼び出し・無限保存を防ぐための状態ロックフラグ
-            let isUpdatingFromCloud = false;
 
             // Custom UI Modal State
             const modal = ref({
@@ -629,168 +589,9 @@
                 }, 2500);
             };
 
-            // Helper to generate a human-readable high-entropy 6-character uppercase sync key
-            const generateSyncKey = () => {
-                const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // High legibility list (avoiding 1, I, 0, O)
-                let result = '';
-                for (let i = 0; i < 6; i++) {
-                    result += chars.charAt(Math.floor(Math.random() * chars.length));
-                }
-                return result;
-            };
-
-            // Setup Synchronization Session and URL Query Parameter logic
-            const initializeSyncId = () => {
-                let id = '';
-                
-                // 1. Read from URL Search/Query Parameters (?syncId=ABCDEF) - Highly resilient across transitions
-                const urlParams = new URLSearchParams(window.location.search);
-                const querySyncId = urlParams.get('syncId');
-                if (querySyncId && querySyncId.match(/^[A-Z2-9]{6}$/)) {
-                    id = cleanKey(querySyncId);
-                    localStorage.setItem('kanatoku_sync_id', id);
-                }
-
-                // 2. Read from Device Memory fallback
-                if (!id) {
-                    const storedId = localStorage.getItem('kanatoku_sync_id');
-                    if (storedId && storedId.match(/^[A-Z2-9]{6}$/)) {
-                        id = storedId;
-                    }
-                }
-
-                // 3. Complete fallback - create fresh key
-                if (!id) {
-                    id = generateSyncKey();
-                    localStorage.setItem('kanatoku_sync_id', id);
-                }
-
-                syncId.value = id;
-                
-                // 【超重要】URL強制リダイレクトによるLINEの「 Safari/Chrome で開く」対策
-                // LINE内ブラウザの仕様として、replaceStateでの書き換え前の初期URLをSafari等に渡してしまいます。
-                // 自ら本物のパラメータ付きURLに強制リロードを1度だけかけることで、LINEにパラメータを完全に記憶させ、他ブラウザに100%同一のsyncIdを渡します。
-                if (querySyncId !== id) {
-                    try {
-                        if (window.location.protocol !== 'blob:' && !window.location.ancestorOrigins?.length) {
-                            const newSearch = new URLSearchParams(window.location.search);
-                            newSearch.set('syncId', id);
-                            window.location.replace(window.location.pathname + '?' + newSearch.toString());
-                        }
-                    } catch (e) {
-                        console.warn("Forced redirection restricted:", e);
-                    }
-                }
-            };
-
-            // Silently writes query parameter/hash back to browser address bar without forcing reloads
-            const updateUrlHash = (id) => {
-                try {
-                    // Blob URL environments and iFrames fail on history updates
-                    if (window.location.protocol === 'blob:' || window.location.ancestorOrigins?.length > 0) {
-                        window.location.hash = `syncId=${id}`;
-                        return;
-                    }
-                    const newSearch = new URLSearchParams(window.location.search);
-                    newSearch.set('syncId', id);
-                    const cleanUrl = window.location.pathname + '?' + newSearch.toString();
-                    history.replaceState(null, document.title, cleanUrl);
-                } catch (e) {
-                    console.warn("History API is restricted in this environment:", e);
-                    try {
-                        window.location.hash = `syncId=${id}`;
-                    } catch (hashError) {
-                        console.warn("Failed to update URL hash safely:", hashError);
-                    }
-                }
-            };
-
-            // Cleaner helper for keys
-            const cleanKey = (val) => {
-                return String(val).trim().toUpperCase();
-            };
-
-            // Primary data setup connector (Watches for authentication state transitions before querying)
-            const setupFirestoreListener = (user) => {
-                if (!user) return;
-                
-                // Unsubscribe from any active previous stream cleanly
-                if (firestoreUnsubscribe) {
-                    firestoreUnsubscribe();
-                }
-
-                const db = window.AppFirebase.db;
-                const appId = window.AppFirebase.appId;
-                const doc = window.AppFirebase.doc;
-                const onSnapshot = window.AppFirebase.onSnapshot;
-
-                // Path adherence (RULE 1 - Strict Pathing rules applied)
-                const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'sync_sessions', syncId.value);
-
-                // Fetch database document reactively
-                firestoreUnsubscribe = onSnapshot(docRef, (snapshot) => {
-                    syncConnected.value = true;
-                    if (snapshot.exists()) {
-                        const data = snapshot.data();
-                        if (data && Array.isArray(data.transactions)) {
-                            // 無限更新ループを防ぐため、クラウドとローカルの内容に差分がある時のみVueを更新
-                            if (JSON.stringify(transactions.value) !== JSON.stringify(data.transactions)) {
-                                isUpdatingFromCloud = true;
-                                transactions.value = JSON.parse(JSON.stringify(data.transactions));
-                                localStorage.setItem('kanatoku_transactions', JSON.stringify(data.transactions));
-                                setTimeout(() => {
-                                    isUpdatingFromCloud = false;
-                                }, 150);
-                            }
-                        }
-                    } else {
-                        // Migrate legacy transactions from LocalStorage to the Cloud if this is a newly generated syncId
-                        const localStored = localStorage.getItem('kanatoku_transactions');
-                        if (localStored) {
-                            try {
-                                const parsed = JSON.parse(localStored);
-                                if (parsed && parsed.length > 0) {
-                                    transactions.value = parsed;
-                                    saveTransactionsToCloud(parsed);
-                                }
-                            } catch (e) {
-                                console.error("Error migrating local storage data to Cloud:", e);
-                            }
-                        }
-                    }
-                }, (error) => {
-                    console.error("Firestore synchronisation error:", error);
-                    syncConnected.value = false;
-                });
-            };
-
-            // Sync modification operations to Firestore document reactively
-            const saveTransactionsToCloud = async (newList) => {
-                if (!firebaseUser.value) return;
-                const db = window.AppFirebase.db;
-                const appId = window.AppFirebase.appId;
-                const doc = window.AppFirebase.doc;
-                const setDoc = window.AppFirebase.setDoc;
-
-                const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'sync_sessions', syncId.value);
-                try {
-                    await setDoc(docRef, {
-                        transactions: JSON.parse(JSON.stringify(newList)),
-                        updatedAt: Date.now()
-                    });
-                } catch (e) {
-                    console.error("Failed to commit data list to Firestore cloud:", e);
-                }
-            };
-
-            // Watch Vue state changes locally and trigger Firestore push
+            // Watch Vue state changes locally and trigger localStorage updates
             watch(transactions, (newVal) => {
-                // Keep local storage as a reliable high-performance fallback
                 localStorage.setItem('kanatoku_transactions', JSON.stringify(newVal));
-                // クラウド受信経由の自己無限ループをロックフラグで確実に遮断
-                if (!isUpdatingFromCloud) {
-                    saveTransactionsToCloud(newVal);
-                }
             }, { deep: true });
 
             // Computed Calculations (Unchanged responsive data structures)
@@ -883,13 +684,7 @@
 
             const copyBlankUrl = () => {
                 try {
-                    const url = new URL(window.location.href);
-                    url.searchParams.delete('syncId');
-                    let cleanUrl = url.origin + url.pathname;
-                    if (window.location.protocol === 'blob:') {
-                        cleanUrl = window.location.href.split('?')[0].split('#')[0];
-                    }
-
+                    const cleanUrl = window.location.origin + window.location.pathname;
                     const textArea = document.createElement("textarea");
                     textArea.value = cleanUrl;
                     textArea.style.top = "0";
@@ -908,7 +703,7 @@
                         throw new Error();
                     }
                 } catch (err) {
-                    showToast("コピーに失敗しました。アドレス欄の?syncId=以降を消して共有してください。", "fa-solid fa-triangle-exclamation");
+                    showToast("コピーに失敗しました。アドレスバーのURLをコピーしてください。", "fa-solid fa-triangle-exclamation");
                 }
             };
 
@@ -1004,43 +799,17 @@
                     modal.value.resolve = null;
                 }
             };
-            
-            // クラウドからデータのリアルタイム再引き受けを行う（切断されたPWAリスナーを強制的に再接続する）
-            const forceReconnectSync = () => {
-                if (firebaseUser.value) {
-                    setupFirestoreListener(firebaseUser.value);
-                }
-            };
 
-            // Lifecycle Hook
             onMounted(() => {
-                // 強制リダイレクト付きのURL＆同期ID解決
-                initializeSyncId();
-
-                // Wait for Firebase Core authentication initialization before booting DB stream (RULE 3 compliance)
-                const checkFirebaseInterval = setInterval(() => {
-                    if (window.AppFirebase && window.AppFirebase.onAuthStateChanged) {
-                        clearInterval(checkFirebaseInterval);
-                        window.AppFirebase.onAuthStateChanged(window.AppFirebase.auth, (user) => {
-                            if (user) {
-                                firebaseUser.value = user;
-                                setupFirestoreListener(user);
-                            }
-                        });
+                // Load local caches
+                const storedTxs = localStorage.getItem('kanatoku_transactions');
+                if (storedTxs) {
+                    try { 
+                        transactions.value = JSON.parse(storedTxs); 
+                    } catch(e) {
+                        console.error("Failed to parse local stored transactions");
                     }
-                }, 100);
-                
-                // 【PWA・バックグラウンドサスペンド復帰対策】
-                // ホーム画面に追加したアプリは、一度バックグラウンドに入るとプロセスがサスペンドされて通信コネクションが切れます。
-                // 再度アプリを開き直した瞬間、または他ブラウザから画面を切り替えた瞬間に自動的に再同期をかけて最新のデータベースと合流させます。
-                document.addEventListener('visibilitychange', () => {
-                    if (document.visibilityState === 'visible') {
-                        forceReconnectSync();
-                    }
-                });
-                window.addEventListener('focus', () => {
-                    forceReconnectSync();
-                });
+                }
             });
 
             return {
@@ -1069,9 +838,7 @@
                 formServiceRemainingCap,
                 formSingleTxReward,
                 formFinalExpectedReward,
-                isRewardCappedByLimit,
-                syncId,
-                syncConnected
+                isRewardCappedByLimit
             };
         }
     }).mount('#app');
